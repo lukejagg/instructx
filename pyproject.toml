@@ -1,13 +1,29 @@
 [tool.poetry]
 name = "instructx"
 version = "0.1.0"
-description = ""
-authors = ["lukejagg <lukejagg@gmail.com>"]
+description = "Typed wrapper for LLMs powered by XML"
+authors = ["Lucas Jaggernauth <lukejagg@gmail.com>"]
 readme = "README.md"
+repository = "https://github.com/lukejagg/instructx"
+classifiers = [
+  "Typing :: Typed",
+  "Intended Audience :: Developers",
+  "Programming Language :: Python :: 3.8",
+  "Programming Language :: Python :: 3.9",
+  "Programming Language :: Python :: 3.10",
+  "Programming Language :: Python :: 3.11",
+  "Programming Language :: Python :: 3.12",
+]
 
 [tool.poetry.dependencies]
-python = "^3.12"
+python = "^3.8"
+pydantic = "^2.8.2"
+openai = "^1.35.15"
+anthropic = "^0.31.2"
 
+[project.urls]
+Homepage = "https://github.com/lukejagg/instructx"
+Repository = "https://github.com/lukejagg/instructx"
 
 [build-system]
 requires = ["poetry-core"]
