@@ -106,11 +106,35 @@ class TypedXML:
         current_token : str = ""  # Current token being parsed, added to current_field after token is closed.
         tag_stack: list[str] = []
         
+        def break_every_tag(iterator: Iterator[str]) -> Iterator[str]:
+            """
+            Used to split text into relevant chunks that can be parsed by the XML parser.
+            Do not send text inside of a tag to the XML parser.
+            """
+            for token in iterator:
+                while ">" in token:
+                    subtoken = token.split(">", 1)[0]
+                    token = token[len(subtoken) + 1:]
+                    yield subtoken + ">"
+                if len(token) > 0:
+                    yield token
+                    
+        def check_tag(token: str) -> bool:
+            nonlocal tag_stack
+            """Check if token is the correct closing tag"""
+            current_tag = tag_stack[-1]
+            if token == f"</{current_tag}>":
+                return True
+            return False
+        
         """
         The XML parser is used to parse the XML into its tags character-by-character.
         When a tag is opened, and that tag is a field, then we switch to the type parser.
+        
+        By splitting each > in the tag, we can ensure that the XML parser will not get random parts of the value inside of the tag, (e.g. "<child>data")
+        and the typed parser will change states to the XML parser correctly (e.g. "data</child>")
         """
-        for token in iterator:
+        for token in break_every_tag(iterator):
             if current_state == State.INSIDE_FIELD:
                 # type_parser._feed(token)
                 # If the text could potentially be a tag, then we parse it as a tag until otherwise noted.
@@ -122,6 +146,26 @@ class TypedXML:
                     
                     if len(previous_token) > 0:
                         current_field_value += previous_token
+                        yield previous_token
+                    
+                    if ">" in current_token:
+                        if check_tag(current_token):
+                            # TODO: Abstract this to its own method (duplicate code)
+                            for xml_chunk in xml_parser.feed(current_token):
+                                assert xml_chunk.action == XMLChunkAction.EXIT, f"Expected EXIT but got {xml_chunk.action}"
+                                assert xml_chunk.tag == tag_stack[-1], f"Expected tag {tag_stack[-1]} but got {xml_chunk.tag}"
+                                tag_stack.pop()
+                            current_state = State.OPEN
+                            yield "exited " + xml_chunk.tag
+                        else:
+                            # This is not the associated closing tag, so we add it to the current field value.
+                            # We stop at the next < so the next iteration can check for tags exactly.
+                            previous_token = current_token.rsplit("<", 1)[0]
+                            current_token = current_token[len(previous_token):]
+                            
+                            if len(previous_token) > 0:
+                                current_field_value += previous_token
+                                yield previous_token
                 else:
                     yield token
                     current_field_value += token
@@ -138,7 +182,7 @@ class TypedXML:
                         # Check if the tag is inside of a field
                         if tag_stack[-1] == "child":
                             current_state = State.INSIDE_FIELD
-                            current_field = ""
+                            current_field_value = ""
                             current_token = ""
                         
                     elif xml_chunk.action == XMLChunkAction.EXIT:
@@ -154,6 +198,7 @@ class TypedXML:
 
 print("Starting")
 xml_string = '<response> <child>data</child>   <child>more data</child>  </response>'
+xml_string = [xml_string[i:i+5] for i in range(0, len(xml_string), 5)]
 for partial in TypedXML.iterparse(None, xml_string):
     print(partial)
 print("Done")
