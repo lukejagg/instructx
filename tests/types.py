@@ -96,13 +96,61 @@ class TypedXML:
         xml_parser = IncrementalXMLParser(model)
         type_parser = IncrementalTypeParser(model)
         
+        # Move this logic to type_parser.
+        class State(Enum):
+            OPEN = "open"
+            INSIDE_FIELD = "typing_value"
+        
+        current_state: State = State.OPEN
+        current_field_value: str | None = None  # Current field being parsed.
+        current_token : str = ""  # Current token being parsed, added to current_field after token is closed.
+        tag_stack: list[str] = []
+        
+        """
+        The XML parser is used to parse the XML into its tags character-by-character.
+        When a tag is opened, and that tag is a field, then we switch to the type parser.
+        """
         for token in iterator:
-            for xml_chunk in xml_parser.feed(token):
-                print(xml_chunk)
-            
+            if current_state == State.INSIDE_FIELD:
+                # type_parser._feed(token)
+                # If the text could potentially be a tag, then we parse it as a tag until otherwise noted.
+                if "<" in token or current_token.startswith("<"):
+                    current_token += token
+                    # Get the text before the last < and add it to the current field value.
+                    previous_token = current_token.rsplit("<", 1)[0]
+                    current_token = current_token[len(previous_token):]
+                    
+                    if len(previous_token) > 0:
+                        current_field_value += previous_token
+                else:
+                    yield token
+                    current_field_value += token
+                    current_token = ""
+                
+                # TODO: Split this check into sub-tokens
+            else:
+                for xml_chunk in xml_parser.feed(token):
+                    # print(xml_chunk)
+                    if xml_chunk.action == XMLChunkAction.ENTER:
+                        tag_stack.append(xml_chunk.tag)
+                        yield "entered " + xml_chunk.tag
+                        
+                        # Check if the tag is inside of a field
+                        if tag_stack[-1] == "child":
+                            current_state = State.INSIDE_FIELD
+                            current_field = ""
+                            current_token = ""
+                        
+                    elif xml_chunk.action == XMLChunkAction.EXIT:
+                        yield "exited " + xml_chunk.tag
+                        # Verify that the tag is the same as the tag on the stack.
+                        if tag_stack[-1] == xml_chunk.tag:
+                            tag_stack.pop()
+                        else:
+                            raise ValueError(f"Expected tag {tag_stack[-1]} but got {xml_chunk.tag}")
             
             # print(ET.tostring(partial).decode())
-            
+
 
 print("Starting")
 xml_string = '<response> <child>data</child>   <child>more data</child>  </response>'
