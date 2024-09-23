@@ -127,7 +127,7 @@ class FieldPartial:
             yield FieldPartialChunk(action=FieldPartialAction.TEXT, text=previous_chunk)
 
     def add(self, text: str) -> Iterator[FieldPartialChunk]:
-        assert not self.exited, f"FieldPartial for {self.field_name} has already exited with \"{self.field_value}\". Could not process \"{text}\""
+        assert not self.exited, f'FieldPartial for {self.field_name} has already exited with "{self.field_value}". Could not process "{text}"'
         self.current_chunk += text
         if "<" in self.current_chunk:
             # Get the text before the last < and add it to the current field value.
@@ -146,7 +146,9 @@ class FieldPartial:
                         ), f"Expected tag {self.parser.current_tag} but got {xml_chunk.tag}"
                         # self.parser.tag_stack.pop()
                         self.exited = True
-                        yield FieldPartialChunk(action=FieldPartialAction.EXIT, text=self.field_value)
+                        yield FieldPartialChunk(
+                            action=FieldPartialAction.EXIT, text=self.field_value
+                        )
                         return
                     raise Exception(f"Failed to parse tag {self.parser.current_tag}")
                 else:
@@ -225,10 +227,13 @@ class IncrementalTypeParser:
     @property
     def is_inside_field(self) -> bool:
         return self.field_partial is not None
-    
+
     def pop_field_partial(self):
         assert self.is_inside_field, f"No field partial to pop"
-        assert self.current_tag == self.field_partial.field_name, f"Expected tag {self.current_tag} to match field name {self.field_partial.field_name}"
+        assert (
+            self.current_tag == self.field_partial.field_name
+        ), f"Expected tag {self.current_tag} to match field name {self.field_partial.field_name}"
+        print(f"Exited {self.current_tag}")
         self.tag_stack.pop()
         self.field_partial = None
 
