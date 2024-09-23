@@ -1,3 +1,6 @@
+from loguru import logger
+print = logger.info
+
 from enum import Enum
 from pydantic import BaseModel
 class ResponseType(BaseModel):
