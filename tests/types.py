@@ -73,15 +73,101 @@ class IncrementalXMLParser:
         yield from self._read_partial()
 
 class IncrementalTypeParser:
+    class FieldPartial:
+        def __init__(self, parser: 'IncrementalTypeParser', field_name: str):
+            self.parser: IncrementalTypeParser = parser
+            self.field_name: str = field_name
+            self.field_value: str = ""
+            self.current_chunk: str = ""
+        
+        def process_text_before_tag(self) -> Iterator[str]:
+            previous_chunk = self.current_chunk.rsplit("<", 1)[0]
+            self.current_chunk = self.current_chunk[len(previous_chunk):]
+            if len(previous_chunk) > 0:
+                self.field_value += previous_chunk
+                yield previous_chunk
+        
+        def add(self, text: str):
+            self.current_chunk += text
+            if "<" in self.current_chunk:
+                # Get the text before the last < and add it to the current field value.
+                yield from self.process_text_before_tag()
+                
+                # If there is a > in the token, then we need to check if it's a closing tag.
+                if ">" in self.current_chunk:
+                    if self.parser._check_tag(self.current_chunk):
+                        # TODO: Abstract this to its own method (duplicate code)
+                        for xml_chunk in self.parser.xml_parser.feed(self.current_chunk):
+                            assert xml_chunk.action == XMLChunkAction.EXIT, f"Expected EXIT but got {xml_chunk.action}"
+                            assert xml_chunk.tag == self.parser.current_tag, f"Expected tag {self.parser.current_tag} but got {xml_chunk.tag}"
+                            self.parser.tag_stack.pop()
+                        yield "exited " + xml_chunk.tag
+                    else:
+                        # This is not the associated closing tag, so we add it to the current field value.
+                        # We stop at the next < so the next iteration can check for tags exactly.
+                        yield from self.process_text_before_tag()
+            else:
+                yield text
+                self.field_value += text
+                self.current_chunk = ""
+    
     def __init__(self, model: Type[T]):
         self.model = model
-        self.stack = []
+        self.xml_parser = IncrementalXMLParser(model)
+        
+        self.field_partial: IncrementalTypeParser.FieldPartial | None = None
+        self.tag_stack: list[str] = []
+
+    def iterparse(self, iterator: Iterator[str]) -> Iterator[XMLChunk]:
+        for text in self._split_end_tags(iterator):
+            if self.is_inside_field:
+                # If the text could potentially be a tag, then we parse it as a tag until otherwise noted.
+                # TODO: Split this check into sub-tokens
+                yield from self.field_partial.add(text)
+            else:
+                for xml_chunk in self.xml_parser.feed(text):
+                    # print(xml_chunk)
+                    if xml_chunk.action == XMLChunkAction.ENTER:
+                        self.tag_stack.append(xml_chunk.tag)
+                        yield "entered " + xml_chunk.tag
+                        # TODO: implement this
+                        if self.tag_stack[-1] == "child":
+                            self.field_partial = IncrementalTypeParser.FieldPartial(parser=self, field_name=self.current_tag)
+                        
+                    elif xml_chunk.action == XMLChunkAction.EXIT:
+                        assert self.current_tag == xml_chunk.tag, f"Expected tag {self.current_tag} but got {xml_chunk.tag}"
+                        yield "exited " + xml_chunk.tag
+                        self.tag_stack.pop()
+                        self.field_partial = None
+            
+            # print(ET.tostring(partial).decode())
     
-    def _feed(self, token):
-        self.stack.append(token)
+    def _split_end_tags(self, iterator: Iterator[str]) -> Iterator[str]:
+        """
+        Used to split text into relevant chunks that can be parsed by the XML parser.
+        Do not send text inside of a tag to the XML parser.
+        """
+        for token in iterator:
+            while ">" in token:
+                subtoken = token.split(">", 1)[0]
+                token = token[len(subtoken) + 1:]
+                yield subtoken + ">"
+            if len(token) > 0:
+                yield token
     
-    def _read_partial(self) -> Iterator[XMLChunk]:
-        pass
+    def _check_tag(self, token: str) -> bool:
+        """Check if token is the correct closing tag"""
+        if token == f"</{self.current_tag}>":
+            return True
+        return False
+    
+    @property
+    def current_tag(self) -> str | None:
+        return self.tag_stack[-1] if len(self.tag_stack) > 0 else None
+    
+    @property
+    def is_inside_field(self) -> bool:
+        return self.field_partial is not None
 
 class TypedXML:
     @classmethod
@@ -93,39 +179,7 @@ class TypedXML:
     @classmethod
     def iterparse(self, model: Type[T], iterator: Iterator[str]) -> Iterator[Partial[T]]:
         """Parse function that takes in an iterator and returns another iterator."""
-        xml_parser = IncrementalXMLParser(model)
         type_parser = IncrementalTypeParser(model)
-        
-        # Move this logic to type_parser.
-        class State(Enum):
-            OPEN = "open"
-            INSIDE_FIELD = "typing_value"
-        
-        current_state: State = State.OPEN
-        current_field_value: str | None = None  # Current field being parsed.
-        current_token : str = ""  # Current token being parsed, added to current_field after token is closed.
-        tag_stack: list[str] = []
-        
-        def break_every_tag(iterator: Iterator[str]) -> Iterator[str]:
-            """
-            Used to split text into relevant chunks that can be parsed by the XML parser.
-            Do not send text inside of a tag to the XML parser.
-            """
-            for token in iterator:
-                while ">" in token:
-                    subtoken = token.split(">", 1)[0]
-                    token = token[len(subtoken) + 1:]
-                    yield subtoken + ">"
-                if len(token) > 0:
-                    yield token
-                    
-        def check_tag(token: str) -> bool:
-            nonlocal tag_stack
-            """Check if token is the correct closing tag"""
-            current_tag = tag_stack[-1]
-            if token == f"</{current_tag}>":
-                return True
-            return False
         
         """
         The XML parser is used to parse the XML into its tags character-by-character.
@@ -134,66 +188,7 @@ class TypedXML:
         By splitting each > in the tag, we can ensure that the XML parser will not get random parts of the value inside of the tag, (e.g. "<child>data")
         and the typed parser will change states to the XML parser correctly (e.g. "data</child>")
         """
-        for token in break_every_tag(iterator):
-            if current_state == State.INSIDE_FIELD:
-                # type_parser._feed(token)
-                # If the text could potentially be a tag, then we parse it as a tag until otherwise noted.
-                if "<" in token or current_token.startswith("<"):
-                    current_token += token
-                    # Get the text before the last < and add it to the current field value.
-                    previous_token = current_token.rsplit("<", 1)[0]
-                    current_token = current_token[len(previous_token):]
-                    
-                    if len(previous_token) > 0:
-                        current_field_value += previous_token
-                        yield previous_token
-                    
-                    if ">" in current_token:
-                        if check_tag(current_token):
-                            # TODO: Abstract this to its own method (duplicate code)
-                            for xml_chunk in xml_parser.feed(current_token):
-                                assert xml_chunk.action == XMLChunkAction.EXIT, f"Expected EXIT but got {xml_chunk.action}"
-                                assert xml_chunk.tag == tag_stack[-1], f"Expected tag {tag_stack[-1]} but got {xml_chunk.tag}"
-                                tag_stack.pop()
-                            current_state = State.OPEN
-                            yield "exited " + xml_chunk.tag
-                        else:
-                            # This is not the associated closing tag, so we add it to the current field value.
-                            # We stop at the next < so the next iteration can check for tags exactly.
-                            previous_token = current_token.rsplit("<", 1)[0]
-                            current_token = current_token[len(previous_token):]
-                            
-                            if len(previous_token) > 0:
-                                current_field_value += previous_token
-                                yield previous_token
-                else:
-                    yield token
-                    current_field_value += token
-                    current_token = ""
-                
-                # TODO: Split this check into sub-tokens
-            else:
-                for xml_chunk in xml_parser.feed(token):
-                    # print(xml_chunk)
-                    if xml_chunk.action == XMLChunkAction.ENTER:
-                        tag_stack.append(xml_chunk.tag)
-                        yield "entered " + xml_chunk.tag
-                        
-                        # Check if the tag is inside of a field
-                        if tag_stack[-1] == "child":
-                            current_state = State.INSIDE_FIELD
-                            current_field_value = ""
-                            current_token = ""
-                        
-                    elif xml_chunk.action == XMLChunkAction.EXIT:
-                        yield "exited " + xml_chunk.tag
-                        # Verify that the tag is the same as the tag on the stack.
-                        if tag_stack[-1] == xml_chunk.tag:
-                            tag_stack.pop()
-                        else:
-                            raise ValueError(f"Expected tag {tag_stack[-1]} but got {xml_chunk.tag}")
-            
-            # print(ET.tostring(partial).decode())
+        yield from type_parser.iterparse(iterator)
 
 
 print("Starting")
