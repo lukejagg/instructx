@@ -3,26 +3,121 @@ from loguru import logger
 print = logger.info
 
 from enum import Enum
-from pydantic import BaseModel
-
-
-class ResponseType(BaseModel):
-    count: int
-
+from pydantic import BaseModel, Field
 
 import re
 from typing import Any, Iterator, List, TypeVar, Type, Union
+from pydantic.fields import FieldInfo
 
 T = TypeVar("T", bound=BaseModel)
+
+from abc import ABC, abstractmethod
+
+"""
+Ideas:
+- Fallback Value
+- Streaming
+"""
+
+
+class PartialType(ABC):
+    current_text: str
+    allow_streaming: bool
+
+    def __init__(self, type_: Type, field_info: FieldInfo, current_text: str = ""):
+        self.type_ = type_
+        self.field_info = field_info
+        self.current_text = current_text
+
+    def set(self, text: str):
+        self.current_text = text
+
+    def update(self, text: str):
+        self.current_text += text
+
+    @abstractmethod
+    def parse(self):
+        pass
+
+
+class PartialInt(PartialType):
+    def __init__(self, field_info: Field):
+        super().__init__(int, field_info)
+
+    def parse(self):
+        return int(self.current_text)
+
+
+class PartialString(PartialType):
+    def __init__(self, field_info: Field):
+        super().__init__(str, field_info)
+
+    def parse(self):
+        return str(self.current_text)
+
+
+class PartialFloat(PartialType):
+    def __init__(self, field_info: Field):
+        super().__init__(float, field_info)
+
+    def parse(self):
+        return float(self.current_text)
+
+
+class PartialBool(PartialType):
+    def __init__(self, field_info: Field):
+        super().__init__(bool, field_info)
+
+    def parse(self):
+        return bool(self.current_text)
+
+
+TYPES: dict[Type, Type[PartialType]] = {
+    int: PartialInt,
+    str: PartialString,
+    float: PartialFloat,
+    bool: PartialBool,
+}
 
 
 class Partial[T]:
     def __init__(self, model: Type[T]):
+        """
+        self.model.__fields__: {field_name: FieldInfo}
+        self.model.__annotations__: {field_name: type}
+        """
         self.model = model
-        self.data = {}
+        self.data: dict[str, PartialType] = {}
 
     def __str__(self):
         return f"Partial({self.data})"
+
+    def to_model(self) -> T:
+        return self.model(
+            **{field_name: field.parse() for field_name, field in self.data.items()}
+        )
+
+    def _create_field_partial(self, field_name: str):
+        if field_name not in self.data:
+            type_object = TYPES[self.model.__annotations__[field_name]]
+            self.data[field_name] = type_object(self.model.__fields__[field_name])
+
+    def set_field(self, field_name: str, value: str):
+        self._create_field_partial(field_name)
+        self.data[field_name].set(value)
+
+    def update_field(self, field_name: str, value: str):
+        self._create_field_partial(field_name)
+        self.data[field_name].update(value)
+
+
+class ResponseType(BaseModel):
+    count: bool
+
+
+partial_test = Partial(ResponseType)
+partial_test.set_field("count", "1")
+print(partial_test.to_model())
 
 
 import xml.etree.ElementTree as ET
@@ -97,21 +192,21 @@ Field Partial is used to parse the value inside of a field. (<response><field_na
 """
 
 
-class FieldPartialAction(Enum):
+class XMLFieldPartialAction(Enum):
     TEXT = "text"
     EXIT = "exit"
 
 
-class FieldPartialChunk:
-    def __init__(self, action: FieldPartialAction, text: str = None):
+class XMLFieldPartialChunk:
+    def __init__(self, action: XMLFieldPartialAction, text: str = None):
         self.action = action
         self.text = text
 
     def __str__(self):
-        return f"FieldPartialChunk({self.action}, {self.text})"
+        return f"XMLFieldPartialChunk({self.action}, {self.text})"
 
 
-class FieldPartial:
+class XMLFieldPartial:
     def __init__(self, parser: "IncrementalTypeParser", field_name: str):
         self.parser: IncrementalTypeParser = parser
         self.field_name: str = field_name
@@ -119,15 +214,17 @@ class FieldPartial:
         self.current_chunk: str = ""
         self.exited: bool = False
 
-    def process_text_before_tag(self) -> Iterator[FieldPartialChunk]:
+    def process_text_before_tag(self) -> Iterator[XMLFieldPartialChunk]:
         previous_chunk = self.current_chunk.rsplit("<", 1)[0]
         self.current_chunk = self.current_chunk[len(previous_chunk) :]
         if len(previous_chunk) > 0:
             self.field_value += previous_chunk
-            yield FieldPartialChunk(action=FieldPartialAction.TEXT, text=previous_chunk)
+            yield XMLFieldPartialChunk(
+                action=XMLFieldPartialAction.TEXT, text=previous_chunk
+            )
 
-    def add(self, text: str) -> Iterator[FieldPartialChunk]:
-        assert not self.exited, f'FieldPartial for {self.field_name} has already exited with "{self.field_value}". Could not process "{text}"'
+    def add(self, text: str) -> Iterator[XMLFieldPartialChunk]:
+        assert not self.exited, f'XMLFieldPartial for {self.field_name} has already exited with "{self.field_value}". Could not process "{text}"'
         self.current_chunk += text
         if "<" in self.current_chunk:
             # Get the text before the last < and add it to the current field value.
@@ -146,8 +243,8 @@ class FieldPartial:
                         ), f"Expected tag {self.parser.current_tag} but got {xml_chunk.tag}"
                         # self.parser.tag_stack.pop()
                         self.exited = True
-                        yield FieldPartialChunk(
-                            action=FieldPartialAction.EXIT, text=self.field_value
+                        yield XMLFieldPartialChunk(
+                            action=XMLFieldPartialAction.EXIT, text=self.field_value
                         )
                         return
                     raise Exception(f"Failed to parse tag {self.parser.current_tag}")
@@ -156,7 +253,7 @@ class FieldPartial:
                     # We stop at the next < so the next iteration can check for tags exactly.
                     yield from self.process_text_before_tag()
         else:
-            yield FieldPartialChunk(action=FieldPartialAction.TEXT, text=text)
+            yield XMLFieldPartialChunk(action=XMLFieldPartialAction.TEXT, text=text)
             self.field_value += text
             self.current_chunk = ""
 
@@ -166,7 +263,7 @@ class IncrementalTypeParser:
         self.model = model
         self.xml_parser = IncrementalXMLParser(model)
 
-        self.field_partial: FieldPartial | None = None
+        self.field_partial: XMLFieldPartial | None = None
         self.tag_stack: list[str] = []
 
     def iterparse(self, iterator: Iterator[str]) -> Iterator[XMLChunk]:
@@ -175,9 +272,9 @@ class IncrementalTypeParser:
                 # If the text could potentially be a tag, then we parse it as a tag until otherwise noted.
                 # TODO: Split this check into sub-tokens
                 for field_chunk in self.field_partial.add(text):
-                    if field_chunk.action == FieldPartialAction.TEXT:
+                    if field_chunk.action == XMLFieldPartialAction.TEXT:
                         yield field_chunk.text
-                    elif field_chunk.action == FieldPartialAction.EXIT:
+                    elif field_chunk.action == XMLFieldPartialAction.EXIT:
                         self.pop_field_partial()
             else:
                 for xml_chunk in self.xml_parser.feed(text):
@@ -187,7 +284,7 @@ class IncrementalTypeParser:
                         yield "entered " + xml_chunk.tag
                         # TODO: implement this
                         if self.tag_stack[-1] == "child":
-                            self.field_partial = FieldPartial(
+                            self.field_partial = XMLFieldPartial(
                                 parser=self, field_name=self.current_tag
                             )
 
