@@ -35,10 +35,13 @@ class PartialType(ABC):
     def update(self, text: str):
         self.current_text += text
 
+    def add_child(self, tag: str):
+        raise NotImplementedError(f"Not implemented by {self.__class__.__name__}")
+    
     @abstractmethod
     def parse(self):
         pass
-
+    
 
 class PartialInt(PartialType):
     def __init__(self, field_info: Field):
@@ -72,12 +75,22 @@ class PartialBool(PartialType):
         return bool(self.current_text)
 
 
+class PartialBaseModel(PartialType):
+    def __init__(self, model: Type[T]):
+        super().__init__(model)
+        self.data: dict[str, PartialType] = {}
+
+
 TYPES: dict[Type, Type[PartialType]] = {
     int: PartialInt,
     str: PartialString,
     float: PartialFloat,
     bool: PartialBool,
 }
+
+def create_partial_instance(model: Type[T]) -> PartialType:
+    type_ = TYPES[model]
+    return type_(model)
 
 
 class Partial[T]:
@@ -88,10 +101,25 @@ class Partial[T]:
         """
         self.model = model
         self.data: dict[str, PartialType] = {}
-
+        
     def __str__(self):
         return f"Partial({self.data})"
 
+    def enter(self, tag: str):
+        if len(self.children) == 0:
+            self.children[tag] = Partial(self.model)
+            print(f"[Partial] Created {tag}")
+        else:
+            self.children[tag] = Partial(self.model.__annotations__[tag])
+            print(f"[Partial] Entered {tag}")
+
+    def exit(self, tag: str, value: str):
+        self.children.pop(tag)
+        print(f"[Partial] Exited {tag} with value {value}")
+    
+    def update(self, tag: str, value: str):
+        self.children[tag].update(value)
+        
     def to_model(self) -> T:
         return self.model(
             **{field_name: field.parse() for field_name, field in self.data.items()}
@@ -110,6 +138,25 @@ class Partial[T]:
         self._create_field_partial(field_name)
         self.data[field_name].update(value)
 
+
+class PartialGenerator:
+    def __init__(self, model: Type[T]):
+        self.model = model
+        self.current_partial: List[Partial] = []
+    
+    def enter(self, tag: str):
+        print(f"[PartialGenerator] Entered {tag}")
+        self.current_partial.append(Partial(self.model))
+        
+    def exit(self, tag: str):
+        print(f"[PartialGenerator] Exited {tag}")
+        self.current_partial.pop()
+    
+    def update(self, tag: str, value: str):
+        self.current_partial[-1].update_field(tag, value)
+    
+    def to_model(self) -> T:
+        ...
 
 class ResponseType(BaseModel):
     count: bool
@@ -160,6 +207,7 @@ class IncrementalXMLParser:
                 and not self.current_text.lstrip().startswith("<")
                 or is_text
             ):
+                # raise Exception(f"[IncrementalXMLParser] Unexpected text: {token}")
                 yield XMLChunk(
                     tag=self.current_element.tag, action=XMLChunkAction.TEXT, text=token
                 )
@@ -263,6 +311,7 @@ class IncrementalTypeParser:
         self.model = model
         self.xml_parser = IncrementalXMLParser(model)
 
+        self.partial_generator: PartialGenerator = PartialGenerator(self.model)
         self.field_partial: XMLFieldPartial | None = None
         self.tag_stack: list[str] = []
 
@@ -273,13 +322,16 @@ class IncrementalTypeParser:
                 # TODO: Split this check into sub-tokens
                 for field_chunk in self.field_partial.add(text):
                     if field_chunk.action == XMLFieldPartialAction.TEXT:
+                        self.partial_generator.update(self.current_tag, field_chunk.text)
                         yield field_chunk.text
                     elif field_chunk.action == XMLFieldPartialAction.EXIT:
+                        self.partial_generator.exit(self.current_tag, field_chunk.text)
                         self.pop_field_partial()
             else:
                 for xml_chunk in self.xml_parser.feed(text):
                     # print(xml_chunk)
                     if xml_chunk.action == XMLChunkAction.ENTER:
+                        self.partial_generator.enter(xml_chunk.tag)
                         self.tag_stack.append(xml_chunk.tag)
                         yield "entered " + xml_chunk.tag
                         # TODO: implement this
@@ -287,11 +339,13 @@ class IncrementalTypeParser:
                             self.field_partial = XMLFieldPartial(
                                 parser=self, field_name=self.current_tag
                             )
+                            print(f"Created field partial for {self.current_tag}")
 
                     elif xml_chunk.action == XMLChunkAction.EXIT:
                         assert (
                             self.current_tag == xml_chunk.tag
                         ), f"Expected tag {self.current_tag} but got {xml_chunk.tag}"
+                        self.partial_generator.exit(xml_chunk.tag)
                         yield "exited " + xml_chunk.tag
                         self.tag_stack.pop()
                         self.field_partial = None
@@ -359,10 +413,13 @@ class TypedXML:
         yield from type_parser.iterparse(iterator)
 
 
+class Test(BaseModel):
+    children: List[str]
+
 print("Starting")
-xml_string = "<response> <child>data</child>   <child>more data</child>  </response>"
+xml_string = "<Test><children> <child>data</child>   <child>more data</child>  </children></Test>"
 xml_string = [xml_string[i : i + 5] for i in range(0, len(xml_string), 5)]
-for partial in TypedXML.iterparse(None, xml_string):
+for partial in TypedXML.iterparse(Test, xml_string):
     print(partial)
 print("Done")
 
