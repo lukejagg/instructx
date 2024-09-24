@@ -2,14 +2,17 @@ from loguru import logger
 
 print = logger.info
 
+import enum
+import inspect
 from enum import Enum
 from pydantic import BaseModel, Field
 
 import re
-from typing import Any, Iterator, List, TypeVar, Type, Union
+from typing import Any, Iterator, List, TypeVar, Type, Union, get_args, get_origin, get_type_hints, override
 from pydantic.fields import FieldInfo
 
-T = TypeVar("T", bound=BaseModel)
+T = TypeVar("T")
+BaseT = TypeVar("BaseT", bound=BaseModel)
 
 from abc import ABC, abstractmethod
 
@@ -24,10 +27,10 @@ class PartialType(ABC):
     current_text: str
     allow_streaming: bool
 
-    def __init__(self, type_: Type, field_info: FieldInfo, current_text: str = ""):
+    def __init__(self, type_: Type, field_info: FieldInfo = None, current_text: str = ""):
         self.type_ = type_
-        self.field_info = field_info
-        self.current_text = current_text
+        # self.field_info = field_info
+        self.current_text = ""
 
     def set(self, text: str):
         self.current_text = text
@@ -44,41 +47,72 @@ class PartialType(ABC):
     
 
 class PartialInt(PartialType):
-    def __init__(self, field_info: Field):
-        super().__init__(int, field_info)
+    def __init__(self):
+        super().__init__(int)
 
+    @override
     def parse(self):
         return int(self.current_text)
 
 
 class PartialString(PartialType):
-    def __init__(self, field_info: Field):
-        super().__init__(str, field_info)
+    def __init__(self):
+        super().__init__(str)
 
+    @override
     def parse(self):
         return str(self.current_text)
 
 
 class PartialFloat(PartialType):
-    def __init__(self, field_info: Field):
-        super().__init__(float, field_info)
+    def __init__(self):
+        super().__init__(float)
 
     def parse(self):
         return float(self.current_text)
 
 
 class PartialBool(PartialType):
-    def __init__(self, field_info: Field):
-        super().__init__(bool, field_info)
+    def __init__(self):
+        super().__init__(bool)
 
+    @override
     def parse(self):
         return bool(self.current_text)
+
+
+class PartialList(PartialType):
+    def __init__(self, inner_type: Type):
+        super().__init__(list)
+        self.inner_type = inner_type
+        self.data: list[PartialType] = []
+
+    @override
+    def add_child(self, tag: str) -> 'Partial':
+        self.data.append(Partial(self.inner_type))
+        return self.data[-1]
+    
+    @override
+    def parse(self):
+        return [item.parse() for item in self.data]
+
 
 
 class PartialBaseModel(PartialType):
     def __init__(self, model: Type[T]):
         super().__init__(model)
+        self.model = model
         self.data: dict[str, PartialType] = {}
+    
+    @override
+    def add_child(self, tag: str) -> 'Partial':
+        print(self.model.__annotations__)
+        self.data[tag] = Partial(self.model.__annotations__[tag])
+        return self.data[tag]
+        
+    @override
+    def parse(self):
+        return self.model(**{field_name: field.parse() for field_name, field in self.data.items()})
 
 
 TYPES: dict[Type, Type[PartialType]] = {
@@ -88,72 +122,81 @@ TYPES: dict[Type, Type[PartialType]] = {
     bool: PartialBool,
 }
 
-def create_partial_instance(model: Type[T]) -> PartialType:
-    type_ = TYPES[model]
-    return type_(model)
+def create_partial_instance(type_: Type) -> PartialType:
+    if get_origin(type_) is list:
+        inner_type = get_args(type_)[0]
+        return PartialList(inner_type)
+    
+    if inspect.isclass(type_):
+        if issubclass(type_, BaseModel):
+            return PartialBaseModel(type_)
+        if type_ in TYPES:
+            return TYPES[type_]()
+        else:
+            raise ValueError(f"Model {type_} is not a BaseModel")
+    
+    raise ValueError(f"Unknown type {type_}")
 
 
 class Partial[T]:
-    def __init__(self, model: Type[T]):
+    """
+    Partial is used to 
+    """
+    def __init__(self, model: Type):
         """
         self.model.__fields__: {field_name: FieldInfo}
         self.model.__annotations__: {field_name: type}
         """
+        if model is None:
+            raise ValueError("Either model or partial_type must be provided")
+
         self.model = model
-        self.data: dict[str, PartialType] = {}
-        
+        self.partial_type = create_partial_instance(model)
+    
     def __str__(self):
-        return f"Partial({self.data})"
+        return f"Partial({self.partial_type})"
 
-    def enter(self, tag: str):
-        if len(self.children) == 0:
-            self.children[tag] = Partial(self.model)
-            print(f"[Partial] Created {tag}")
-        else:
-            self.children[tag] = Partial(self.model.__annotations__[tag])
-            print(f"[Partial] Entered {tag}")
-
-    def exit(self, tag: str, value: str):
-        self.children.pop(tag)
-        print(f"[Partial] Exited {tag} with value {value}")
+    def add_child(self, tag: str) -> 'Partial':
+        return self.partial_type.add_child(tag)
     
     def update(self, tag: str, value: str):
         self.children[tag].update(value)
         
     def to_model(self) -> T:
-        return self.model(
-            **{field_name: field.parse() for field_name, field in self.data.items()}
-        )
+        # return self.model(
+        #     **{field_name: field.parse() for field_name, field in self.data.items()}
+        # )
+        return None
 
     def _create_field_partial(self, field_name: str):
-        if field_name not in self.data:
-            type_object = TYPES[self.model.__annotations__[field_name]]
-            self.data[field_name] = type_object(self.model.__fields__[field_name])
+        ...
 
-    def set_field(self, field_name: str, value: str):
-        self._create_field_partial(field_name)
-        self.data[field_name].set(value)
+    def set_field(self, value: str):
+        self.partial_type.set(value)
 
-    def update_field(self, field_name: str, value: str):
-        self._create_field_partial(field_name)
-        self.data[field_name].update(value)
+    def update_field(self, value: str):
+        self.partial_type.update(value)
 
 
 class PartialGenerator:
     def __init__(self, model: Type[T]):
         self.model = model
-        self.current_partial: List[Partial] = []
+        self.partial_stack: List[Partial] = []
     
-    def enter(self, tag: str):
+    def enter(self, tag: str):            
         print(f"[PartialGenerator] Entered {tag}")
-        self.current_partial.append(Partial(self.model))
+        if len(self.partial_stack) == 0:
+            self.partial_stack.append(Partial(self.model))
+        else:
+            self.partial_stack.append(self.partial_stack[-1].add_child(tag))
         
-    def exit(self, tag: str):
-        print(f"[PartialGenerator] Exited {tag}")
-        self.current_partial.pop()
+    def exit(self, tag: str, text: str = None):
+        print(f"[PartialGenerator] Exited {tag} with text: {text}")
+        self.partial_stack.pop()
     
     def update(self, tag: str, value: str):
-        self.current_partial[-1].update_field(tag, value)
+        # TODO: Include the Field in the Partial
+        self.partial_stack[-1].update_field(value)
     
     def to_model(self) -> T:
         ...
@@ -163,7 +206,7 @@ class ResponseType(BaseModel):
 
 
 partial_test = Partial(ResponseType)
-partial_test.set_field("count", "1")
+# partial_test.set_field("count", "1")
 print(partial_test.to_model())
 
 
