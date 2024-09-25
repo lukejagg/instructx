@@ -52,7 +52,7 @@ class PartialType(ABC):
 
     def __str__(self):
         return f"{self.type_}({self.current_text})"
-    
+
     def __repr__(self):
         return f"{self.type_}({self.current_text})"
 
@@ -80,7 +80,7 @@ class PartialType(ABC):
         The current value of the partial that will be returned from the iterator.
         """
         pass
-    
+
     @abstractmethod
     def done(self):
         pass
@@ -100,16 +100,17 @@ class PartialInt(PartialType):
     @override
     def partial(self):
         return self.parse()
-    
+
     @override
     def done(self):
         self._value = self.parse()
+
 
 class PartialString(PartialType):
     def __init__(self):
         super().__init__(str, is_primitive=True)
         self._value: str = None
-    
+
     @override
     def parse(self):
         if self._value is not None:
@@ -119,7 +120,7 @@ class PartialString(PartialType):
     @override
     def partial(self):
         return self.parse()
-    
+
     @override
     def done(self):
         self._value = self.parse()
@@ -138,7 +139,7 @@ class PartialFloat(PartialType):
     @override
     def partial(self):
         return self.parse()
-    
+
     @override
     def done(self):
         self._value = self.parse()
@@ -158,7 +159,7 @@ class PartialBool(PartialType):
     @override
     def partial(self):
         return self.parse()
-    
+
     @override
     def done(self):
         self._value = self.parse()
@@ -186,7 +187,7 @@ class PartialList(PartialType):
     @override
     def partial(self):
         return self._partial
-    
+
     @override
     def done(self):
         self._value = self.parse()
@@ -214,8 +215,10 @@ class PartialBaseModel(PartialType):
 
     @override
     def partial(self):
-        return Partial(self.model, attrs={key: value for key, value in self.data.items()})
-    
+        return Partial(
+            self.model, attrs={key: value for key, value in self.data.items()}
+        )
+
     @override
     def done(self):
         self._value = self.parse()
@@ -246,7 +249,12 @@ def create_partial_instance(type_: Type) -> PartialType:
 
 
 class Partial[T]:
-    def __init__(self, partial_type: PartialType, attrs: dict[str, PartialType] = None, items: list[PartialType] = None):
+    def __init__(
+        self,
+        partial_type: PartialType,
+        attrs: dict[str, PartialType] = None,
+        items: list[PartialType] = None,
+    ):
         """
         self.model.__fields__: {field_name: FieldInfo}
         self.model.__annotations__: {field_name: type}
@@ -260,10 +268,12 @@ class Partial[T]:
             items = ", ".join([repr(item.partial()) for item in self._items])
             return f"[{items}, ...]"
         if self._attrs is not None:
-            attrs = " ".join([f"{key}={repr(value.partial())}" for key, value in self._attrs.items()])
+            attrs = " ".join(
+                [f"{key}={repr(value.partial())}" for key, value in self._attrs.items()]
+            )
             return f"Partial.{self.partial_type.__name__}({attrs})"
         return f"Partial.{self.partial_type.__name__}"
-    
+
     def __repr__(self):
         return self.__str__()
 
@@ -532,8 +542,12 @@ class TypedXML:
     @classmethod
     def parse(self, model: Type[T], iterator: Union[str, Iterator[str]]) -> Partial[T]:
         if isinstance(iterator, str):
-            iterator = iter(iterator)
-        return self.iterparse(iterator)
+            iterator = [iterator]
+
+        type_parser = IncrementalTypeParser(model)
+        for res in type_parser.iterparse(iterator):
+            pass
+        return res
 
     @classmethod
     def iterparse(
@@ -550,6 +564,11 @@ class TypedXML:
         and the typed parser will change states to the XML parser correctly (e.g. "data</child>")
         """
         yield from type_parser.iterparse(iterator)
+
+
+"""
+Examples
+"""
 
 
 class Test(BaseModel):
@@ -571,30 +590,6 @@ for partial in TypedXML.iterparse(Test, xml_string):
     logger.success(partial.children)
     logger.success(partial.friends)
 print("\n" + "-" * 20 + "\n" + "Done")
-
-
-def xml_parser(xml: str, model: Type[T]) -> T:
-    def get_next_token():
-        """Gets"""
-
-    print(xml)
-    partial = Partial(model)
-    stack = []
-
-    for line in xml.split("\n"):
-        line = line.strip()
-        if line.startswith("<") and not line.startswith("</"):
-            tag = re.match(r"<(\w+)>", line).group(1)
-            stack.append(tag)
-        elif line.startswith("</"):
-            tag = stack.pop()
-        else:
-            data[stack[-1]] = line
-
-    print(data)
-    print(stack)
-
-    return model(**data)
 
 
 """
@@ -675,5 +670,5 @@ examples = [
 ]
 
 for example in examples:
-    parsed_data = xml_parser(example.string, example.model)
+    parsed_data = TypedXML.parse(model=example.model, iterator=example.string)
     print(parsed_data)
