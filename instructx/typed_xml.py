@@ -1,28 +1,22 @@
 from abc import ABC, abstractmethod
-import re
-import enum
 from enum import Enum
-import inspect
 from loguru import logger
-import xml.etree.ElementTree as ET
 
-from pydantic import BaseModel, Field, ValidationError
-from pydantic.fields import FieldInfo
+from pydantic import BaseModel
 from typing import (
-    Any,
     Iterator,
-    List,
     TypeVar,
     Type,
     Union,
-    get_args,
-    get_origin,
-    get_type_hints,
-    override,
 )
 
 from instructx.partials import Partial, PartialGenerator
-from instructx.xml import IncrementalXMLParser, XMLChunkAction, XMLFieldPartial, XMLFieldPartialAction
+from instructx.xml_parser import (
+    IncrementalXMLParser,
+    XMLChunkAction,
+    XMLFieldPartial,
+    XMLFieldPartialAction,
+)
 
 print = logger.info
 
@@ -139,4 +133,3 @@ class TypedXML:
         and the typed parser will change states to the XML parser correctly (e.g. "data</child>")
         """
         yield from type_parser.iterparse(iterator)
-

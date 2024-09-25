@@ -3,7 +3,6 @@ import enum
 from enum import Enum
 import inspect
 from loguru import logger
-import xml.etree.ElementTree as ET
 
 from pydantic import BaseModel, Field, ValidationError
 from pydantic.fields import FieldInfo

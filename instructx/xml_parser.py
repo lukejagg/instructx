@@ -1,30 +1,8 @@
-from abc import ABC, abstractmethod
-import re
-import enum
 from enum import Enum
-import inspect
-from loguru import logger
+from typing import Type, Iterator
 import xml.etree.ElementTree as ET
 
-from pydantic import BaseModel, Field, ValidationError
-from pydantic.fields import FieldInfo
-from typing import (
-    Any,
-    Iterator,
-    List,
-    TypeVar,
-    Type,
-    Union,
-    get_args,
-    get_origin,
-    get_type_hints,
-    override,
-)
-
-print = logger.info
-
-T = TypeVar("T")
-BaseT = TypeVar("BaseT", bound=BaseModel)
+from pydantic import BaseModel
 
 
 class XMLChunkAction(Enum):
@@ -44,7 +22,7 @@ class XMLChunk:
 
 
 class IncrementalXMLParser:
-    def __init__(self, model: Type[T]):
+    def __init__(self, model: Type):
         self.model = model
         self.parser = ET.XMLPullParser(events=["start", "end"])
         self.current_text = ""
