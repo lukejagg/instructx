@@ -52,6 +52,9 @@ class PartialType(ABC):
 
     def __str__(self):
         return f"{self.type_}({self.current_text})"
+    
+    def __repr__(self):
+        return f"{self.type_}({self.current_text})"
 
     def set(self, text: str):
         self.current_text = text
@@ -167,7 +170,7 @@ class PartialList(PartialType):
         self.inner_type = inner_type
         self.data: list[PartialType] = []
         self._value: list = None
-        self._temp: list = []
+        self._partial: Partial[list] = Partial(list, items=self.data)
 
     @override
     def add_child(self, tag: str) -> "PartialType":
@@ -182,7 +185,7 @@ class PartialList(PartialType):
 
     @override
     def partial(self):
-        return Partial(partial_type=list, items=[item for item in self.data])
+        return self._partial
     
     @override
     def done(self):
@@ -249,23 +252,30 @@ class Partial[T]:
         self.model.__annotations__: {field_name: type}
         """
         self.partial_type = partial_type
-        self._attrs = attrs
-        self._items = items
+        self._attrs: dict[str, PartialType] = attrs
+        self._items: list[PartialType] = items
 
     def __str__(self):
         if self._items is not None:
-            items = ", ".join([str(item.partial()) for item in self._items])
-            return f"Partial.{self.partial_type.__name__}({items})"
+            items = ", ".join([repr(item.partial()) for item in self._items])
+            return f"[{items}, ...]"
         if self._attrs is not None:
-            attrs = " ".join([f"{key}={value}" for key, value in self._attrs.items()])
+            attrs = " ".join([f"{key}={repr(value.partial())}" for key, value in self._attrs.items()])
             return f"Partial.{self.partial_type.__name__}({attrs})"
         return f"Partial.{self.partial_type.__name__}"
+    
+    def __repr__(self):
+        return self.__str__()
 
     def __getattr__(self, key: str):
+        if not self._attrs:
+            raise AttributeError(f"Partial {self.partial_type} has no attributes")
+        if key not in self._attrs:
+            return None
         return self._attrs[key].partial()
 
-    def __getitem__(self, key: int):
-        return self._items[key].partial()
+    def __getitem__(self, index: int):
+        return self._items[index].partial()
 
 
 class PartialGenerator:
@@ -544,14 +554,22 @@ class TypedXML:
 
 class Test(BaseModel):
     children: list[str]
+    friends: list[list[int]]
 
 
 print("\nStarting\n" + "-" * 20)
-xml_string = "<Test><children> <child>data</child>   <child>more data</child>  </children></Test>"
+xml_string = """<Test>
+<children> <child>data</child>   <child>more data</child>  </children>
+<friends> 
+<friend_group_1> <friend>1</friend> <friend>2</friend> </friend_group_1>
+<friend_group_2> <friend>3</friend> <friend>4</friend> </friend_group_2>
+</friends>
+</Test>"""
 xml_string = [xml_string[i : i + 5] for i in range(0, len(xml_string), 5)]
 for partial in TypedXML.iterparse(Test, xml_string):
     logger.success(partial)
     logger.success(partial.children)
+    logger.success(partial.friends)
 print("\n" + "-" * 20 + "\n" + "Done")
 
 
