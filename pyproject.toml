@@ -21,6 +21,9 @@ pydantic = "^2.8.2"
 openai = "^1.35.15"
 anthropic = "^0.31.2"
 
+[tool.poetry.group.dev.dependencies]
+loguru = "^0.7.2"
+
 [project.urls]
 Homepage = "https://github.com/lukejagg/instructx"
 Repository = "https://github.com/lukejagg/instructx"
