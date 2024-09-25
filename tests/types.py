@@ -1,20 +1,31 @@
+from abc import ABC, abstractmethod
+import re
+import enum
+from enum import Enum
+import inspect
 from loguru import logger
+import xml.etree.ElementTree as ET
+
+from pydantic import BaseModel, Field, ValidationError
+from pydantic.fields import FieldInfo
+from typing import (
+    Any,
+    Iterator,
+    List,
+    TypeVar,
+    Type,
+    Union,
+    get_args,
+    get_origin,
+    get_type_hints,
+    override,
+)
 
 print = logger.info
-
-import enum
-import inspect
-from enum import Enum
-from pydantic import BaseModel, Field, ValidationError
-
-import re
-from typing import Any, Iterator, List, TypeVar, Type, Union, get_args, get_origin, get_type_hints, override
-from pydantic.fields import FieldInfo
 
 T = TypeVar("T")
 BaseT = TypeVar("BaseT", bound=BaseModel)
 
-from abc import ABC, abstractmethod
 
 """
 Ideas:
@@ -28,7 +39,12 @@ class PartialType(ABC):
     allow_streaming: bool
     is_primitive: bool
 
-    def __init__(self, type_: Type, is_primitive: bool, field_info: FieldInfo = None, current_text: str = ""):
+    def __init__(
+        self,
+        type_: Type,
+        is_primitive: bool,
+        field_info: FieldInfo = None,
+    ):
         self.type_ = type_
         # self.field_info = field_info
         self.current_text = ""
@@ -37,12 +53,6 @@ class PartialType(ABC):
     def __str__(self):
         return f"{self.type_}({self.current_text})"
 
-    def __getattr__(self, key: str):
-        raise AttributeError(f"{self.__class__.__name__} has no attribute {key}")
-
-    def __getitem__(self, index: int):
-        raise NotImplementedError(f"__getitem__ Not implemented by {self.__class__.__name__}")
-
     def set(self, text: str):
         self.current_text = text
 
@@ -50,73 +60,105 @@ class PartialType(ABC):
         self.current_text += text
 
     def add_child(self, tag: str):
-        raise NotImplementedError(f"Not implemented by {self.__class__.__name__}")
-    
+        raise NotImplementedError(
+            f"add_child Not implemented by {self.__class__.__name__}"
+        )
+
     @abstractmethod
     def parse(self):
         """
         Convert the partial to the original type.
         """
         pass
-    
+
     @abstractmethod
-    def current(self):
+    def partial(self):
         """
         The current value of the partial that will be returned from the iterator.
         """
         pass
     
+    @abstractmethod
+    def done(self):
+        pass
+
 
 class PartialInt(PartialType):
     def __init__(self):
         super().__init__(int, is_primitive=True)
+        self._value: int = None
 
     @override
     def parse(self):
-        return int(self.current_text)
-    
-    @override
-    def current(self):
+        if self._value is not None:
+            return self._value
         return int(self.current_text)
 
+    @override
+    def partial(self):
+        return self.parse()
+    
+    @override
+    def done(self):
+        self._value = self.parse()
 
 class PartialString(PartialType):
     def __init__(self):
         super().__init__(str, is_primitive=True)
-        
-    @override
-    def parse(self):
-        return str(self.current_text)
+        self._value: str = None
     
     @override
-    def current(self):
+    def parse(self):
+        if self._value is not None:
+            return self._value
         return str(self.current_text)
+
+    @override
+    def partial(self):
+        return self.parse()
+    
+    @override
+    def done(self):
+        self._value = self.parse()
 
 
 class PartialFloat(PartialType):
     def __init__(self):
         super().__init__(float, is_primitive=True)
-        
+
     @override
     def parse(self):
+        if self._value is not None:
+            return self._value
         return float(self.current_text)
+
+    @override
+    def partial(self):
+        return self.parse()
     
     @override
-    def current(self):
-        return float(self.current_text)
+    def done(self):
+        self._value = self.parse()
 
 
 class PartialBool(PartialType):
     def __init__(self):
         super().__init__(bool, is_primitive=True)
-        
+        self._value: bool = None
+
     @override
     def parse(self):
+        if self._value is not None:
+            return self._value
         return bool(self.current_text)
 
     @override
-    def current(self):
-        return bool(self.current_text)
+    def partial(self):
+        return self.parse()
+    
+    @override
+    def done(self):
+        self._value = self.parse()
 
 
 class PartialList(PartialType):
@@ -124,20 +166,27 @@ class PartialList(PartialType):
         super().__init__(list, is_primitive=False)
         self.inner_type = inner_type
         self.data: list[PartialType] = []
+        self._value: list = None
+        self._temp: list = []
 
     @override
-    def add_child(self, tag: str) -> 'Partial':
-        self.data.append(Partial(self.inner_type))
+    def add_child(self, tag: str) -> "PartialType":
+        self.data.append(create_partial_instance(self.inner_type))
         return self.data[-1]
-    
+
     @override
     def parse(self):
+        if self._value is not None:
+            return self._value
         return [item.parse() for item in self.data]
+
+    @override
+    def partial(self):
+        return Partial(partial_type=list, items=[item for item in self.data])
     
     @override
-    def current(self):
-        return [item.current() for item in self.data]
-
+    def done(self):
+        self._value = self.parse()
 
 
 class PartialBaseModel(PartialType):
@@ -145,22 +194,28 @@ class PartialBaseModel(PartialType):
         super().__init__(model, is_primitive=False)
         self.model = model
         self.data: dict[str, Partial] = {}
-    
-    def __getattr__(self, key: str):
-        return self.data.get(key)
-    
+        self._value = None
+
     @override
-    def add_child(self, tag: str) -> 'Partial':
-        self.data[tag] = Partial(self.model.__annotations__[tag])
+    def add_child(self, tag: str) -> "Partial":
+        self.data[tag] = create_partial_instance(self.model.__annotations__[tag])
         return self.data[tag]
-        
+
     @override
     def parse(self):
-        return self.model(**{field_name: field.parse() for field_name, field in self.data.items()})
+        if self._value is not None:
+            return self._value
+        return self.model(
+            **{field_name: field.parse() for field_name, field in self.data.items()}
+        )
+
+    @override
+    def partial(self):
+        return Partial(self.model, attrs={key: value for key, value in self.data.items()})
     
     @override
-    def current(self):
-        return Partial(self.model)
+    def done(self):
+        self._value = self.parse()
 
 
 TYPES: dict[Type, Type[PartialType]] = {
@@ -170,11 +225,12 @@ TYPES: dict[Type, Type[PartialType]] = {
     bool: PartialBool,
 }
 
+
 def create_partial_instance(type_: Type) -> PartialType:
     if get_origin(type_) is list:
         inner_type = get_args(type_)[0]
         return PartialList(inner_type)
-    
+
     if inspect.isclass(type_):
         if issubclass(type_, BaseModel):
             return PartialBaseModel(type_)
@@ -182,94 +238,65 @@ def create_partial_instance(type_: Type) -> PartialType:
             return TYPES[type_]()
         else:
             raise ValueError(f"Model {type_} is not a BaseModel")
-    
+
     raise ValueError(f"Unknown type {type_}")
 
 
 class Partial[T]:
-    """
-    Partial is used to 
-    """
-    def __init__(self, model: Type):
+    def __init__(self, partial_type: PartialType, attrs: dict[str, PartialType] = None, items: list[PartialType] = None):
         """
         self.model.__fields__: {field_name: FieldInfo}
         self.model.__annotations__: {field_name: type}
         """
-        if model is None:
-            raise ValueError("Either model or partial_type must be provided")
+        self.partial_type = partial_type
+        self._attrs = attrs
+        self._items = items
 
-        self.model = model
-        self.partial_type = create_partial_instance(model)
-    
     def __str__(self):
-        return f"Partial({self.partial_type})"
+        if self._items is not None:
+            items = ", ".join([str(item.partial()) for item in self._items])
+            return f"Partial.{self.partial_type.__name__}({items})"
+        if self._attrs is not None:
+            attrs = " ".join([f"{key}={value}" for key, value in self._attrs.items()])
+            return f"Partial.{self.partial_type.__name__}({attrs})"
+        return f"Partial.{self.partial_type.__name__}"
 
-    def add_child(self, tag: str) -> 'Partial':
-        return self.partial_type.add_child(tag)
-    
-    def update(self, tag: str, value: str):
-        self.children[tag].update(value)
-        
-    def to_model(self) -> T:
-        try:
-            return self.partial_type.parse()
-        except ValidationError as e:
-            return self.partial_type
-    
-    def parse(self):
-        return self.partial_type.parse()
-        
-    def set_field(self, value: str):
-        self.partial_type.set(value)
-
-    def update_field(self, value: str):
-        self.partial_type.update(value)
-
-    @property
-    def is_primitive(self) -> bool:
-        return self.partial_type.is_primitive
-    
     def __getattr__(self, key: str):
-        return getattr(self.partial_type, key)
+        return self._attrs[key].partial()
+
+    def __getitem__(self, key: int):
+        return self._items[key].partial()
 
 
 class PartialGenerator:
     def __init__(self, model: Type[T]):
         self.model = model
-        self.partial_stack: List[Partial] = []
-        self.main_partial: Partial = None
-    
-    def enter(self, tag: str):            
+        self.partial_stack: List[PartialType] = []
+        self.main_partial: PartialType = None
+
+    def enter(self, tag: str):
         if len(self.partial_stack) == 0:
-            self.partial_stack.append(Partial(self.model))
+            self.partial_stack.append(create_partial_instance(self.model))
             self.main_partial = self.partial_stack[0]
         else:
             self.partial_stack.append(self.partial_stack[-1].add_child(tag))
-        
+
     def exit(self, tag: str, text: str = None):
-        self.partial_stack.pop()
-    
+        self.partial_stack.pop().done()
+
     def update(self, tag: str, value: str):
         # TODO: Include the Field in the Partial
-        self.partial_stack[-1].update_field(value)
-    
+        self.partial_stack[-1].update(value)
+
     @property
     def is_editing_primitive(self) -> bool:
         return len(self.partial_stack) > 0 and self.partial_stack[-1].is_primitive
-    
-    def to_model(self) -> T:
-        ...
+
+    def to_model(self) -> T: ...
+
 
 class ResponseType(BaseModel):
     count: bool
-
-
-partial_test = Partial(ResponseType)
-# partial_test.set_field("count", "1")
-print(partial_test.to_model())
-
-
-import xml.etree.ElementTree as ET
 
 
 class XMLChunkAction(Enum):
@@ -424,8 +451,10 @@ class IncrementalTypeParser:
                 # TODO: Split this check into sub-tokens
                 for field_chunk in self.field_partial.add(text):
                     if field_chunk.action == XMLFieldPartialAction.TEXT:
-                        self.partial_generator.update(self.current_tag, field_chunk.text)
-                        yield self.partial_generator.main_partial
+                        self.partial_generator.update(
+                            self.current_tag, field_chunk.text
+                        )
+                        yield self.partial_generator.main_partial.partial()
                     elif field_chunk.action == XMLFieldPartialAction.EXIT:
                         self.partial_generator.exit(self.current_tag, field_chunk.text)
                         self.pop_field_partial()
@@ -449,8 +478,9 @@ class IncrementalTypeParser:
                         self.tag_stack.pop()
                         self.field_partial = None
 
-        return self.partial_generator.main_partial
-            # print(ET.tostring(partial).decode())
+        yield self.partial_generator.main_partial.parse()
+        return self.partial_generator.main_partial.parse()
+        # print(ET.tostring(partial).decode())
 
     def _split_end_tags(self, iterator: Iterator[str]) -> Iterator[str]:
         """
@@ -515,10 +545,12 @@ class TypedXML:
 class Test(BaseModel):
     children: list[str]
 
+
 print("\nStarting\n" + "-" * 20)
 xml_string = "<Test><children> <child>data</child>   <child>more data</child>  </children></Test>"
 xml_string = [xml_string[i : i + 5] for i in range(0, len(xml_string), 5)]
 for partial in TypedXML.iterparse(Test, xml_string):
+    logger.success(partial)
     logger.success(partial.children)
 print("\n" + "-" * 20 + "\n" + "Done")
 
