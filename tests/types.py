@@ -186,6 +186,8 @@ class PartialList(PartialType):
 
     @override
     def partial(self):
+        if self._value is not None:
+            return self._value
         return self._partial
 
     @override
@@ -215,6 +217,8 @@ class PartialBaseModel(PartialType):
 
     @override
     def partial(self):
+        if self._value is not None:
+            return self._value
         return Partial(
             self.model, attrs={key: value for key, value in self.data.items()}
         )
